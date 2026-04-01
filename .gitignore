@@ -14,12 +14,12 @@ target/
 .sts4-cache
 out
 target
-src/main/resources/application.properties
 .opencode
 .beads
 .env
 .env.*
 !.env.example
+!.env.*.example
 
 ### IntelliJ IDEA ###
 .idea
