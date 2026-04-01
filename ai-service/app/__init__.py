@@ -1,0 +1,3 @@
+"""
+FinGenie AI Service
+"""

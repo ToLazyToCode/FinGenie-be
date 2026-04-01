@@ -1,0 +1,279 @@
+services:
+  # ===========================================
+  # PostgreSQL - Primary Database
+  # ===========================================
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: fingenie-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ===========================================
+  # Redis - Feature Store & Cache
+  # ===========================================
+  redis:
+    image: redis:7-alpine
+    container_name: fingenie-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ===========================================
+  # Kafka Infrastructure
+  # ===========================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: fingenie-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    healthcheck:
+      test: echo srvr | nc localhost 2181 || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: fingenie-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: kafka-broker-api-versions --bootstrap-server localhost:9092
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: fingenie-kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: fingenie-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    restart: unless-stopped
+
+  # ===========================================
+  # MLflow - Model Tracking & Registry
+  # ===========================================
+  mlflow:
+    build:
+      context: ./mlflow
+      dockerfile: Dockerfile
+    image: fingenie-mlflow:2.10.0-postgres
+    container_name: fingenie-mlflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    environment:
+      MLFLOW_BACKEND_STORE_URI: ${MLFLOW_BACKEND_STORE_URI:?Set MLFLOW_BACKEND_STORE_URI in .env}
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlflow/artifacts
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    command: >
+      mlflow server
+      --backend-store-uri ${MLFLOW_BACKEND_STORE_URI:?Set MLFLOW_BACKEND_STORE_URI in .env}
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ===========================================
+  # Ollama - Local LLM Runtime
+  # ===========================================
+#  ollama:
+#    image: ollama/ollama:latest
+#    container_name: fingenie-ollama
+#    ports:
+#      - "11434:11434"
+#    volumes:
+#      - ./ollama:/root/.ollama
+#    healthcheck:
+#      test: ["CMD", "ollama", "list"]
+#      interval: 20s
+#      timeout: 10s
+#      retries: 10
+#    restart: unless-stopped
+#
+#  ollama-init:
+#    image: ollama/ollama:latest
+#    container_name: fingenie-ollama-init
+#    depends_on:
+#      ollama:
+#        condition: service_healthy
+#    entrypoint: [ "/bin/sh", "-c" ]
+#    command: "OLLAMA_HOST=http://ollama:11434 ollama pull llama3.2"
+#    restart: "no"
+
+  # ===========================================
+  # AI Service (Python FastAPI)
+  # ===========================================
+  ai-service:
+    build:
+      context: ./ai-service
+      dockerfile: Dockerfile
+    container_name: fingenie-ai-service
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+#      ollama:
+#        condition: service_healthy
+#      ollama-init:
+#        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      # Local host-mode default keeps BE in IntelliJ and infra in Docker.
+      # For full docker mode set AI_BACKEND_URL=http://backend:8080.
+      BACKEND_URL: ${AI_BACKEND_URL:-http://host.docker.internal:8080}
+      AI_MODEL_VERSION: v1.0.0
+      AI_FALLBACK_ENABLED: "true"
+      LOG_LEVEL: INFO
+      VECTOR_ENABLED: "true"
+      VECTOR_DB_URL: ${VECTOR_DB_URL:?Set VECTOR_DB_URL in .env}
+      VECTOR_TABLE: ai_embeddings
+      VECTOR_DIMENSION: 384
+      VECTOR_TOP_K: 5
+      EMBEDDING_MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2
+#      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+#      OLLAMA_MODEL: llama3.2
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+      LLM_FAILURE_COOLDOWN_SECONDS: 300
+    volumes:
+      - ./ai-service:/app
+      - ai_models:/app/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ===========================================
+  # Spring Boot Backend (optional full docker mode)
+  # ===========================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fingenie-backend
+    profiles: ["fullstack"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      ai-service:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:?err}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:?err}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?err}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:?err}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      AI_SERVICE_URL: http://ai-service:8000
+      MAIL_USERNAME: ${MAIL_USERNAME:?Set MAIL_USERNAME in .env}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:?Set MAIL_PASSWORD in .env}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ===========================================
+  # Mailhog - Email Testing
+  # ===========================================
+#  mailhog:
+#    image: mailhog/mailhog:latest
+#    container_name: fingenie-mailhog
+#    ports:
+#      - "1025:1025"  # SMTP
+#      - "8025:8025"  # Web UI
+#    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  zookeeper_data:
+  zookeeper_logs:
+  kafka_data:
+  mlflow_artifacts:
+  ai_models:
+#  ollama_data:

@@ -1,0 +1,234 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration scan="true" scanPeriod="30 seconds">
+
+    <!-- ============================================
+         FinGenie Backend - Logback Configuration
+         
+         Features:
+         - JSON structured logging for production
+         - Console logging for development  
+         - MDC context propagation (correlationId, userId)
+         - Log level per package/profile
+         - Log rotation for file appenders
+         ============================================ -->
+
+    <!-- Properties from Spring -->
+    <springProperty scope="context" name="appName" source="spring.application.name" defaultValue="fingenie"/>
+    <springProperty scope="context" name="sentryDsn" source="sentry.dsn" defaultValue=""/>
+    
+    <!-- Common timestamp pattern -->
+    <property name="LOG_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{correlationId:-}] [%X{userId:-}] %-5level %logger{36} - %msg%n"/>
+    <property name="LOG_DIR" value="${LOG_DIR:-logs}"/>
+
+    <!-- ============================================
+         APPENDERS
+         ============================================ -->
+
+    <!-- Console Appender - Human readable for development -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %highlight(%-5level) [%blue(%X{correlationId:-N/A})] %cyan(%logger{30}) - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Console Appender - JSON for production -->
+    <appender name="CONSOLE_JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <includeMdcKeyName>correlationId</includeMdcKeyName>
+            <includeMdcKeyName>userId</includeMdcKeyName>
+            <includeMdcKeyName>requestPath</includeMdcKeyName>
+            <includeMdcKeyName>requestMethod</includeMdcKeyName>
+            <includeMdcKeyName>errorCode</includeMdcKeyName>
+            
+            <!-- Custom field names -->
+            <fieldNames>
+                <timestamp>@timestamp</timestamp>
+                <message>message</message>
+                <logger>logger</logger>
+                <level>level</level>
+                <thread>thread</thread>
+                <stackTrace>stack_trace</stackTrace>
+            </fieldNames>
+            
+            <!-- Add application context -->
+            <customFields>{"application":"${appName}","environment":"${SPRING_PROFILES_ACTIVE:-local}"}</customFields>
+            
+            <!-- Include caller info for errors only -->
+            <includeCallerData>false</includeCallerData>
+            
+            <!-- Mask sensitive data -->
+            <jsonGeneratorDecorator class="net.logstash.logback.mask.MaskingJsonGeneratorDecorator">
+                <valueMask>
+                    <value>password</value>
+                    <mask>****</mask>
+                </valueMask>
+                <valueMask>
+                    <value>token</value>
+                    <mask>****</mask>
+                </valueMask>
+                <valueMask>
+                    <value>secret</value>
+                    <mask>****</mask>
+                </valueMask>
+                <valueMask>
+                    <value>authorization</value>
+                    <mask>****</mask>
+                </valueMask>
+            </jsonGeneratorDecorator>
+        </encoder>
+    </appender>
+
+    <springProfile name="staging,prod,production">
+        <!-- Rolling File Appender - JSON for production logs -->
+        <appender name="FILE_JSON" class="ch.qos.logback.core.rolling.RollingFileAppender">
+            <file>${LOG_DIR}/fingenie.json</file>
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <includeMdcKeyName>correlationId</includeMdcKeyName>
+                <includeMdcKeyName>userId</includeMdcKeyName>
+                <includeMdcKeyName>requestPath</includeMdcKeyName>
+                <includeMdcKeyName>requestMethod</includeMdcKeyName>
+                <includeMdcKeyName>errorCode</includeMdcKeyName>
+
+                <fieldNames>
+                    <timestamp>@timestamp</timestamp>
+                    <message>message</message>
+                    <logger>logger</logger>
+                    <level>level</level>
+                    <thread>thread</thread>
+                    <stackTrace>stack_trace</stackTrace>
+                </fieldNames>
+
+                <customFields>{"application":"${appName}"}</customFields>
+            </encoder>
+
+            <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+                <fileNamePattern>${LOG_DIR}/fingenie.%d{yyyy-MM-dd}.json.gz</fileNamePattern>
+                <maxHistory>30</maxHistory>
+                <totalSizeCap>1GB</totalSizeCap>
+            </rollingPolicy>
+        </appender>
+
+        <!-- Error File Appender - Separate file for errors -->
+        <appender name="FILE_ERROR" class="ch.qos.logback.core.rolling.RollingFileAppender">
+            <file>${LOG_DIR}/fingenie-error.json</file>
+            <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+                <level>ERROR</level>
+            </filter>
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <includeMdcKeyName>correlationId</includeMdcKeyName>
+                <includeMdcKeyName>userId</includeMdcKeyName>
+                <includeCallerData>true</includeCallerData>
+            </encoder>
+
+            <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+                <fileNamePattern>${LOG_DIR}/fingenie-error.%d{yyyy-MM-dd}.json.gz</fileNamePattern>
+                <maxHistory>90</maxHistory>
+                <totalSizeCap>500MB</totalSizeCap>
+            </rollingPolicy>
+        </appender>
+
+        <!-- Async Appender for performance -->
+        <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
+            <queueSize>512</queueSize>
+            <discardingThreshold>0</discardingThreshold>
+            <includeCallerData>false</includeCallerData>
+            <appender-ref ref="FILE_JSON"/>
+        </appender>
+    </springProfile>
+
+    <!-- ============================================
+         LOGGER CONFIGURATIONS
+         ============================================ -->
+
+    <!-- Application loggers -->
+    <logger name="fingenie.com.fingenie" level="INFO"/>
+    <logger name="fingenie.com.fingenie.common" level="DEBUG"/>
+    <logger name="fingenie.com.fingenie.module.ai" level="DEBUG"/>
+
+    <!-- Spring Framework -->
+    <logger name="org.springframework" level="WARN"/>
+    <logger name="org.springframework.web" level="INFO"/>
+    <logger name="org.springframework.security" level="WARN"/>
+
+    <!-- Hibernate/JPA -->
+    <logger name="org.hibernate" level="WARN"/>
+    <logger name="org.hibernate.SQL" level="DEBUG"/>
+    <logger name="org.hibernate.type.descriptor.sql.BasicBinder" level="TRACE"/>
+
+    <!-- Database connection pool -->
+    <logger name="com.zaxxer.hikari" level="INFO"/>
+
+    <!-- Redis -->
+    <logger name="org.springframework.data.redis" level="INFO"/>
+
+    <!-- Kafka -->
+    <logger name="org.apache.kafka" level="WARN"/>
+    <logger name="org.springframework.kafka" level="INFO"/>
+
+    <!-- Sentry -->
+    <logger name="io.sentry" level="WARN"/>
+
+    <!-- ============================================
+         PROFILE-SPECIFIC CONFIGURATIONS
+         ============================================ -->
+
+    <!-- Local/Development Profile -->
+    <springProfile name="local,dev,development">
+        <root level="DEBUG">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+        
+        <!-- Enable SQL logging in dev -->
+        <logger name="org.hibernate.SQL" level="DEBUG"/>
+        <logger name="fingenie.com.fingenie" level="DEBUG"/>
+    </springProfile>
+
+    <!-- Test Profile -->
+    <springProfile name="test">
+        <root level="WARN">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+        
+        <logger name="fingenie.com.fingenie" level="INFO"/>
+    </springProfile>
+
+    <!-- Staging Profile -->
+    <springProfile name="staging">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE_JSON"/>
+            <appender-ref ref="ASYNC_FILE"/>
+            <appender-ref ref="FILE_ERROR"/>
+        </root>
+    </springProfile>
+
+    <!-- Production Profile -->
+    <springProfile name="prod,production">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE_JSON"/>
+            <appender-ref ref="ASYNC_FILE"/>
+            <appender-ref ref="FILE_ERROR"/>
+        </root>
+        
+        <!-- Reduce noise in production -->
+        <logger name="org.hibernate.SQL" level="WARN"/>
+        <logger name="fingenie.com.fingenie" level="INFO"/>
+    </springProfile>
+
+    <!-- Docker Profile -->
+    <springProfile name="docker">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE_JSON"/>
+        </root>
+
+        <logger name="org.hibernate.SQL" level="WARN"/>
+        <logger name="fingenie.com.fingenie" level="INFO"/>
+    </springProfile>
+
+    <!-- Default (when no profile is set) -->
+    <springProfile name="default">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+
+</configuration>
