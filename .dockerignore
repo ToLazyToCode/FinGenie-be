@@ -1,0 +1,9 @@
+target/
+.git/
+.idea/
+.m2/
+logs/
+data/
+boot-*.log
+DIFF_REPORT.md
+*.iml
